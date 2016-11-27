@@ -1,0 +1,546 @@
+---
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    highlight: zenburn
+    theme: flatly
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
+               cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE, error=FALSE,
+               message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+
+# Overview
+```{r check-library-functions, echo=FALSE}
+check_install = function(packages) {
+   not_installed = setdiff(packages, rownames(installed.packages()))
+   if(length(not_installed) > 0) {
+      write(paste("The libraries", not_installed, "are not installed, aborting.",
+                   sep=" "), stdout())
+      stop()
+   }
+}
+```
+
+```{r load-libraries, echo=FALSE}
+packages = c("ggplot2", "reshape", "gplots", "edgeR", "CHBUtils", "pheatmap",
+              "DESeq2", "tximport", "logging", "DT")
+check_install(packages)
+installed = lapply(packages, library, character.only = TRUE)
+```
+
+```{r qc-setup}
+basicConfig()
+project_summary = "/Users/rory/cache/fabio-splicing/2016-04-26_fabio-splicing/project-summary.csv"
+counts_file = "/Users/rory/cache/fabio-splicing/2016-04-26_fabio-splicing/combined.counts"
+tx2genes_file = "/Users/rory/cache/fabio-splicing/2016-04-26_fabio-splicing/tx2gene.csv"
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+"#0072B2", "#D55E00", "#CC79A7")
+summarydata = read.table(project_summary, header=TRUE, sep=",")
+summarydata = summarydata[,colSums(is.na(summarydata)) < nrow(summarydata)]
+# handle newer bcbio-nextgen runs that use description as the key
+if("description" %in% colnames(summarydata)) {
+  rownames(summarydata) = summarydata$description
+  summarydata$Name = rownames(summarydata)
+  summarydata$description = NULL
+} else {
+  rownames(summarydata) = summarydata$Name
+  summarydata$Name = NULL
+}
+summarydata = summarydata[order(rownames(summarydata)),]
+if (file.exists(tx2genes_file)) {
+  sample_dirs = file.path("..", "..", rownames(summarydata))
+  salmon_files = file.path(sample_dirs, "salmon", "quant.sf")
+  sailfish_files = file.path(sample_dirs, "sailfish", "quant.sf")
+  new_sailfish = file.path(sample_dirs, "sailfish", "quant", "quant.sf")
+  new_salmon = file.path(sample_dirs, "salmon", "quant", "quant.sf")
+  if (file.exists(salmon_files[1])) {
+    loginfo("Using gene counts calculated from the Salmon transcript counts.")
+    sf_files = salmon_files
+  } else if (file.exists(sailfish_files[1])) {
+    loginfo("Using gene counts calculated from the Sailfish transcript counts.")
+    sf_files = sailfish_files
+  }
+  else if (file.exists(new_sailfish[1])) {
+    loginfo("Using gene counts calculated from the Sailfish transcript counts.")
+    sf_files = new_sailfish
+  }
+  else if (file.exists(new_salmon[1])) {
+    loginfo("Using gene counts calculated from the Salmon transcript counts.")
+    sf_files = new_salmon
+    }
+  names(sf_files) = rownames(summarydata)
+  tx2gene = read.table(tx2genes_file, sep=",", row.names=NULL, header=FALSE)
+  txi.salmon = tximport(sf_files, type="salmon", tx2gene=tx2gene,
+                        reader=readr::read_tsv, countsFromAbundance="lengthScaledTPM")
+  counts = round(data.frame(txi.salmon$counts, check.names=FALSE))
+} else {
+  loginfo("Using gene counts calculated from featureCounts.")
+  counts = read.table(counts_file, header=TRUE, row.names="id", check.names=FALSE)
+}
+counts = counts[, order(colnames(counts)), drop=FALSE]
+colnames(counts) = gsub(".counts", "", colnames(counts))
+
+# this is a list of all non user-supplied metadata columns that could appear
+known_columns = c("Name", "X.GC", "Exonic.Rate", "Sequences.flagged.as.poor.quality",
+    "rRNA_rate", "Fragment.Length.Mean", "Intronic.Rate", "Intergenic.Rate",
+    "Mapping.Rate", "Quality.format", "Duplication.Rate.of.Mapped", "Mapped",
+    "rRNA", "Sequence.length", "Transcripts.Detected", "Mean.Per.Base.Cov.",
+    "Genes.Detected", "Unique.Starts.Per.Read", "unique_starts_per_read",
+    "complexity", "X5.3.bias", "Duplicates.pct", "Duplicates", "Mapped.reads",
+    "Average.insert.size", "Mapped.reads.pct", "Total.reads",
+    "avg_coverage_per_region", "Mapped.Reads")
+summarydata[,"Fragment.Length.Mean"] = summarydata$Average.insert.size
+metadata = summarydata[, !colnames(summarydata) %in% known_columns, drop=FALSE]
+metadata = metadata[, colSums(is.na(metadata)) < nrow(metadata)]
+```
+
+```{r set-random-seed}
+# set seed for reproducibility
+set.seed(1454944673)
+```
+
+```{r heatmap-function}
+get_heatmap_fn = function(summarydata) {
+    # return the pheatmap function with or without metadata
+    if(ncol(metadata) == 0) {
+       return(pheatmap)
+    }
+    else {
+    # rownames(metadata) = summarydata$Name
+    heatmap_fn = function(data, ...) {
+        pheatmap(data, annotation=metadata, ...)
+    }
+    return(heatmap_fn)
+}}
+heatmap_fn = get_heatmap_fn(summarydata)
+```
+
+# Quality control metrics
+
+```{r qualimap-run}
+qualimap_run = "Mapped" %in% colnames(summarydata)
+do_quality = "Mapped.reads" %in% colnames(summarydata)
+```
+
+## Mapped reads
+We have a good amount of mapped reads per sample and it is fairly
+consistent between the samples.
+
+```{r mapped-plot, eval=qualimap_run}
+ggplot(summarydata, aes(x=Name, y=Mapped)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    geom_bar(stat="identity") +
+    ylab("mapped reads") + xlab("")
+```
+
+```{r mapped-plot-noqualimap, eval=!qualimap_run & do_quality}
+ggplot(summarydata, aes(x=Name, y=Mapped.reads)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    geom_bar(stat="identity") +
+    ylab("mapped reads") + xlab("")
+```
+
+## Genomic mapping rate
+The genomic mapping rate is great, and mostly consistent across the
+samples, another good indication of quality libraries.
+
+```{r mapping-rate-plot, eval=qualimap_run}
+ggplot(summarydata, aes(x=Name, y=Mapping.Rate)) +
+    geom_bar(stat="identity") +
+    ylab("mapping rate") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+```{r mapping-rate-plot-noqualimap, eval=!qualimap_run & do_quality}
+ggplot(summarydata, aes(x=Name, y=Mapped.reads.pct)) +
+    geom_bar(stat="identity") +
+    ylab("mapping rate") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## Number of genes detected
+We see a large number of genes detected in these samples, a good indication
+of quality.
+```{r genes-detected-plot}
+dd = data.frame(Name=colnames(counts), Genes.Detected = colSums(counts > 0))
+ggplot(dd, aes(x=Name, y=Genes.Detected)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("")
+```
+
+## Gene detection saturation
+We can see that as we sequence deeper, we can detect more genes.
+
+```{r saturation-plot, eval=do_quality}
+dd = data.frame(Mapped=summarydata$Mapped, Genes.Detected = colSums(counts > 0))
+ggplot(dd, aes(x=Mapped, y=Genes.Detected)) +
+    geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("reads mapped")
+```
+
+## Exonic mapping rate
+The exonic mapping rate looks great, indicating we actually sequenced
+RNA and not genomic DNA.
+
+```{r exonic-mapping-plot, eval="Exonic.Rate" %in% colnames(summarydata)}
+ggplot(summarydata, aes(x=Name, y=Exonic.Rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("exonic mapping rate") + xlab("")
+```
+
+## rRNA mapping rate
+The rRNA mapping rate has some variability, but is low like we expect.
+```{r check-rRNA-eval}
+eval_rRNA = "rRNA_rate" %in% colnames(summarydata) & !sum(is.na(summarydata$rRNA_rate)) == nrow(summarydata)
+```
+
+```{r rRNA-rate-plot, eval=eval_rRNA & do_quality}
+ggplot(summarydata, aes(x=Name, y=rRNA_rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("rRNA rate") + xlab("")
+```
+
+## Estimated fragment length of paired-end reads
+Some libraries have shorter fragment lengths than the other libraries.
+The overall fragment length is low, for looking at splicing grabbing
+lengths closer to 300 might have been better.
+
+```{r fragment-length-plot, eval="Fragment.Length.Mean" %in% colnames(summarydata) & do_quality}
+ggplot(summarydata, aes(x=Name, y=Fragment.Length.Mean)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("fragment length") + xlab("")
+```
+
+## Boxplot of log10 counts per gene
+Highly consistent. This looks awesome.
+
+```{r boxplot-raw}
+melted = melt(counts)
+colnames(melted) = c("sample", "count")
+melted$sample = factor(melted$sample)
+melted = melted[order(melted$sample),]
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Boxplot of log10 TMM-normalized counts per gene
+Trimmed mean of M-values (TMM) normalization is described
+[here](http://genomebiology.biomedcentral.com/articles/10.1186/gb-2010-11-3-r25)
+
+Robinson, M. D., & Oshlack, A. (2010). A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biology, 11(3). doi:10.1186/gb-2010-11-3-r25
+
+Looks great.
+```{r boxplot-normalized}
+y = DGEList(counts=counts)
+y = calcNormFactors(y)
+normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
+melted = melt(normalized_counts)
+colnames(melted) = c("gene", "sample", "count")
+melted$sample = factor(melted$sample)
+melted = melted[order(melted$sample),]
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Density of log10 TMM-normalized counts
+Beautifully consistent.
+```{r density-normalized}
+ggplot(melted, aes(x=count, group=sample)) +
+    geom_density() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Correlation (Pearson) heatmap of TMM-normalized counts
+You can see Pearson doesn't really cluster the samples well.
+```{r pearson-heatmap-normalized, eval=ncol(counts) > 1}
+heatmap_fn(cor(normalized_counts, method="pearson"))
+```
+
+## Correlation (Spearman) heatmap of TMM-normalized counts
+Spearman gets it though.
+```{r spearman-heatmap-normalized, eval=ncol(counts) > 1}
+heatmap_fn(cor(normalized_counts, method="spearman"))
+```
+
+## PCA plot
+Doing PCA on the 500 most variable genes does a great job clustering the
+samples by genotype. We should expect to see a lot of differences between
+these samples, which is kind of bad if we want to look at splicing. It will
+make picking the splicing events out more difficult.
+
+```{r pca, eval=ncol(counts) > 1}
+dds = DESeqDataSetFromMatrix(countData=counts, colData=summarydata, design=~Name)
+vst = varianceStabilizingTransformation(dds)
+plotPCA(vst, intgroup=c("genotype"))
+```
+```{r deseq2-tximport-helper-functions}
+# snagged from development version of DESeq
+DESeqDataSetFromTximport <- function(txi, colData, design, ...)
+{
+  counts <- round(txi$counts)
+  mode(counts) <- "integer"
+  dds <- DESeqDataSetFromMatrix(countData=counts, colData=colData, design=design, ...)
+  stopifnot(txi$countsFromAbundance %in% c("no","scaledTPM","lengthScaledTPM"))
+  if (txi$countsFromAbundance %in% c("scaledTPM","lengthScaledTPM")) {
+    message("using length scaled TPM counts from tximport")
+  } else {
+    message("using counts and average transcript lengths from tximport")
+    lengths <- txi$length
+    dimnames(lengths) <- dimnames(dds)
+    assays(dds)[["avgTxLength"]] <- lengths
+  }
+  return(dds)
+}
+
+subset_tximport = function(txi, rows, columns) {
+    txi$counts = txi$counts[rows, columns]
+    txi$abundance = txi$abundance[rows, columns]
+    txi$length = txi$length[rows, columns]
+    return(txi)
+}
+```
+
+```{r de-setup}
+library(DEGreport)
+library(vsn)
+design = ~genotype
+condition = "genotype"
+```
+
+# Differential expression
+
+```{r deseq2-expression-analysis, results='asis'}
+counts <- counts[rowSums(counts>0)>1,]
+if(exists("txi.salmon")) {
+   loginfo("Using Sailfish gene counts for the DESeq2 model.")
+   txi.salmon = subset_tximport(txi.salmon, rownames(counts), colnames(counts))
+   dds = DESeqDataSetFromTximport(txi.salmon, colData=summarydata, design=design)
+} else {
+  loginfo("Using counts from featureCounts for the DESeq2 model.")
+  dds = DESeqDataSetFromMatrix(countData=counts,
+      colData=summarydata, design = design  )
+}
+geoMeans = apply(counts, 1, function(row) if (all(row == 0)) 0 else
+                 exp(mean(log(row[row != 0]))))
+dds = estimateSizeFactors(dds, geoMeans=geoMeans)
+dds = DESeq(dds)
+```
+
+## Effect of variance stabilization
+
+```{r deseq-diagnostics, results='asis'}
+par(mfrow=c(1,3))
+notAllZero <- (rowSums(counts(dds))>0)
+rld <- rlog(dds)
+vsd <- varianceStabilizingTransformation(dds)
+rlogMat <- assay(rld)
+vstMat <- assay(vsd)
+
+meanSdPlot(log2(counts(dds,normalized=TRUE)[notAllZero,] + 1))
+meanSdPlot(assay(rld[notAllZero,]))
+meanSdPlot(assay(vsd[notAllZero,]))
+```
+
+## Dispersion estimates
+
+```{r dispersion-estimate}
+plotDispEsts(dds)
+```
+
+```{r deseq2-handler}
+handle_deseq2 = function(dds, summarydata, column) {
+  all_combs = combn(levels(summarydata[,column]), 2, simplify=FALSE)
+  all_results = list()
+  contrast_strings = list()
+  for(comb in all_combs) {
+    contrast_string = paste(comb, collapse=" vs ")
+    contrast = c(column, comb)
+    res = results(dds, contrast=contrast)
+    res = res[order(res$padj),]
+    all_results = c(all_results, res)
+    contrast_strings = c(contrast_strings, contrast_string)
+  }
+  names(all_results) = contrast_strings
+  return(all_results)
+}
+```
+
+```{r biomart-lookup}
+library(biomaRt)
+library(dplyr)
+human = useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                dataset="hsapiens_gene_ensembl",
+                host = "jul2015.archive.ensembl.org")
+symbols = getBM(attributes=c("ensembl_gene_id", "external_gene_name",
+                             "gene_biotype"), mart=human)
+join_biomart = function(res, symbols) {
+  res = data.frame(res)
+  res$id = rownames(res)
+  res = res %>% left_join(symbols, by=c("id"="ensembl_gene_id"))
+  res = res[order(res$padj),]
+  return(res)
+}
+```
+
+```{r new-MAplot}
+library(cowplot)
+ourMAplot = function(results) {
+  results$DE = results$padj < 0.05
+  ggplot(results, aes(baseMean, log2FoldChange, color=DE)) +
+    geom_point(size=0.5) +
+    guides(color=FALSE) +
+    scale_color_manual(values=c("black", "red")) +
+    xlab("mean expression") +
+    ylab("log2 fold change") +
+    scale_x_log10() +
+    ylim(c(-4, 4))
+}
+```
+
+## Differential expression {.tabset}
+For these comparisons, positive log2 fold changes are higher in `PRPF8` and
+`PRPF38` knockouts than the `control` samples. There are a lot of genes
+different for both samples, which means it might be tough to pick out
+splicing differences.
+
+## PRP8 vs control
+```{r prpf8-vs-control}
+prpf8 = results(dds, contrast=c("genotype", "prpf8", "control"))
+plotMA(prpf8)
+prpf8 = as.data.frame(prpf8)
+volcano_density_plot(prpf8[, c(2,6)], title="PRPF8 vs control", lfc.cutoff=2)
+prpf8 = join_biomart(prpf8, symbols)
+write.table(prpf8, file="prpf8-vs-control.csv", col.names=TRUE, row.names=FALSE,
+            quote=FALSE, sep=",")
+```
+
+```{r newMA-prpf8}
+ourMAplot(prpf8)
+```
+ihere are `r nrow(subset(prpf8, padj < 0.05))` genes differentially expressed
+between the `PRPF8` and the `control` samples.
+
+## PRPF38 vs control
+```{r prpf38-vs-control}
+prpf38 = results(dds, contrast=c("genotype", "prpf38", "control"))
+plotMA(prpf38)
+prpf38 = as.data.frame(prpf38)
+volcano_density_plot(prpf38[, c(2,6)], title="PRPF38 vs control", lfc.cutoff=2)
+prpf38 = join_biomart(prpf38, symbols)
+write.table(prpf38, file="prpf38-vs-control.csv", col.names=TRUE, row.names=FALSE,
+            quote=FALSE, sep=",")
+```
+
+```{r newMA-prpf38}
+ourMAplot(prpf38)
+```
+
+There are `r nrow(subset(prpf38, padj < 0.05))` genes differentially expressed
+between the `PRPF38` and the `control` samples.
+
+# Summary
+These libraries look awesome, some of the best RNA-seq libraries I have seen in
+a long time. We find a huge amount of differential expression at the gene level
+between these samples, which might make it hard to look at splicing differences.
+We could also be falsely calling gene level differential expression if there is
+a large amount of splicing differences between the samples. The next step
+is to look at splicing differences between the samples, we'll do that first
+at the transcript level, since that will have the most easily interpretable
+results. After that we will look at sub-exon level with DEXSeq and then
+move on to event level descriptions which will require more work.
+
+# Links
+[PRPF8 vs control results](prpf8-vs-control.csv)
+
+[PRPF38 vs control results](prpf38-vs-control.csv)
+
+```{r write-rdata}
+save(counts, txi.salmon, summarydata, file="counts.RData")
+```
+
+# Gene expression plots
+These plots are modeled after the figures in `Modulation of splicing catalysis
+for therapeutic targeting of leukemia with mutations in genes encoding
+spliceosomal proteins`. They are basically MA plots rotated 45 degrees, but with
+coloring by fold change cutoffs instead of the results of statistical tests.
+
+These are PNGs so not suitable for publication, but we can twiddle a parameter
+in these reports to generate PDFs instead later on.
+
+## PRPF8 vs Control
+
+```{r get-basemeans-per-level}
+baseMeanPerLevel = function(lvl) {
+  rowMeans(counts(dds, normalized=TRUE)[, dds$genotype == lvl])
+}
+bml = data.frame(sapply(levels(dds$genotype), baseMeanPerLevel))
+prpf8toplot = unique(data.frame(id=prpf8$id, log2FoldChange=prpf8$log2FoldChange))
+rownames(prpf8toplot) = prpf8toplot$id
+bml$prpf8fc = ifelse(prpf8toplot[rownames(bml),]$log2FoldChange < -1.32, "less",
+              ifelse(prpf8toplot[rownames(bml),]$log2FoldChange > 1.32, "greater",
+                     "same"))
+prpf38toplot = unique(data.frame(id=prpf38$id, log2FoldChange=prpf38$log2FoldChange))
+rownames(prpf38toplot) = prpf38toplot$id
+bml$prpf38fc = ifelse(prpf38toplot[rownames(bml),]$log2FoldChange < -1.32, "less",
+               ifelse(prpf38toplot[rownames(bml),]$log2FoldChange > 1.32, "greater",
+                      "same"))
+```
+
+```{r prpf8-control-geneplot}
+library(cowplot)
+library(viridis)
+ggplot(bml, aes(control, prpf8, color=prpf8fc)) + geom_point(size=0.5) +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_viridis(discrete=TRUE) +
+  theme(text=element_text(family='Gill Sans')) +
+  xlab("control") +
+  ylab("PRPF8 KO")
+```
+
+## PRPF38 vs Control
+```{r prpf38-control-geneplot}
+ggplot(bml, aes(control, prpf38, color=prpf38fc)) + geom_point(size=0.5) +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_viridis(discrete=TRUE) +
+  theme(text=element_text(family='Gill Sans')) +
+  xlab("control") +
+  ylab("PRPF38 KO")
+```
