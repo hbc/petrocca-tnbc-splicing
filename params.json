@@ -1,0 +1,6 @@
+{
+  "name": "TNBC splicing",
+  "tagline": "",
+  "body": "[Quality control and gene-level differential expression](https://rawgit.com/hbc/petrocca-tnbc-splicing/master/qc-summary.html)\r\n\r\n[Transcript differential expression with Sleuth](https://rawgit.com/hbc/petrocca-tnbc-splicing/master/miso-RI.html)\r\n\r\n[Retained intron event expression with MISO](https://rawgit.com/hbc/petrocca-tnbc-splicing/master/transcript-differential-expression.html)",
+  "note": "Don't delete this file! It's used internally to help with page regeneration."
+}
